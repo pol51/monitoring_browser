@@ -44,6 +44,7 @@ class Browser(QWidget):
       'exit'          : self.cmdExit,
       'next'          : self.cmdNext,
       'restart'       : self.cmdRestart,
+      'upgrade'       : self.cmdUpgrade,
     }
     
     self.timer = QTimer()
@@ -157,7 +158,14 @@ class Browser(QWidget):
   def cmdRestart(self, args):
     self.print_('>> restart')
     self.close()
-
+    
+  def cmdUpgrade(self, args):
+    self.print_('>> upgrade')
+    update = urllib.urlopen('https://raw.github.com/pol51/monitoring_browser/master/webkit.py').read()
+    script = file('webkit.py', 'w')
+    script.write(update)
+    script.close()
+    self.close()
 
 # main
 browser = Browser()
