@@ -12,11 +12,145 @@ from PySide.QtWebKit import QWebView
 app = QApplication(sys.argv)
 
 
-class Site:
-    def __init__(self, url, time, zoom=1):
+class Site(QWebView):
+    def __init__(self, parent, url, time, zoom=1):
+        super(Site, self).__init__(parent)
+        parent.layout.addWidget(self)
+
+        self.page().networkAccessManager().sslErrors.connect(self.on_ssl_errors)
+
         self.url = url
         self.time = time
         self.zoom = zoom
+
+        self.hide()
+        self.load(url)
+        self.setZoomFactor(zoom)
+
+    def set_zoom(self, zoom):
+        self.zoom = zoom
+        self.setZoomFactor(zoom)
+
+    def on_ssl_errors(self, reply, errors):
+        reply.ignoreSslErrors()
+
+
+class Command(object):
+    commands = dict()
+
+    def __init__(self, name):
+        self.name = name
+
+    def __call__(self, f):
+        def wrapped_f(self, *args):
+            f(self, *args)
+        Command.commands[self.name] = wrapped_f
+        return wrapped_f
+
+
+class RemoteShell(QTcpServer):
+    commands = dict()
+
+    def __init__(self, browser):
+        super(RemoteShell, self).__init__(browser)
+        self.browser = browser
+
+        self.socket = False
+        self.newConnection.connect(self._on_connection)
+        self.listen(QHostAddress.Any, 4242)
+
+    def print_message(self, text):
+        self.socket.write(text + '\n')
+
+    def print_commands(self):
+        self.print_message('avaible commands:')
+        for command in Command.commands.keys():
+            self.print_message('  ' + command)
+
+    @Command('help')
+    def help(self, args):
+        self.print_message('>> help')
+        self.print_commands()
+
+    @Command('refresh')
+    def refresh(self, args):
+        self.print_message('>> refresh ' + self.url.toString().encode())
+        self.current_page.reload()
+
+    @Command('add')
+    def add(self, args):
+        self.print_message('>> add ' + args[1] + ' ' + args[2] + ' ' + args[3])
+        self.browser.sites.append(Site(self, QUrl(args[1]), int(args[2], int(args[3]))))
+
+    @Command('delete')
+    def delete(self, args):
+        self.print_message('>> del ' + args[1])
+        self.browser.sites.pop(int(args[1]))
+
+    @Command('ls')
+    def ls(self, args):
+        self.print_message('>> list')
+        self.print_message('current list:')
+        i = 0
+        for site in self.browser.sites:
+            self.print_message('%1c[%1d] %2ds : %3s' % (
+                (site == browser.current_site) and '*' or ' ', i, site.time, site.url.toString().encode()))
+            i += 1
+
+    @Command('zoom')
+    def zoom(self, args):
+        self.print_message('>> zoom ' + args[1])
+        self.browser.current_site.set_zoom(float(args[1]))
+
+    @Command('fullscreen')
+    def fullscreen(self, args):
+        self.print_message('>> fullscreen ' + args[1])
+        if args[1] == '1':
+            self.browser.showFullScreen()
+        else:
+            self.browser.showNormal()
+
+    @Command('exit')
+    def exit(self, args):
+        self.print_message('>> exit')
+        self.socket.close()
+
+    @Command('next')
+    def next(self, args):
+        self.browser.show_next()
+        self.print_message('>> next ' + self.browser.current_site.url.toString().encode())
+
+    @Command('restart')
+    def restart(self, args):
+        self.print_message('>> restart')
+        self.browser.close()
+
+    @Command('upgrade')
+    def upgrade(self, args):
+        self.print_message('>> upgrade')
+        update = urllib.urlopen('https://raw.github.com/pol51/monitoring_browser/master/webkit.py').read()
+        script = file('webkit.py', 'w')
+        script.write(update)
+        script.close()
+        self.close()
+
+    def _on_connection(self):
+        self.socket = self.nextPendingConnection()
+        self.socket.write(self.browser.hostname + ' % ')
+        self.connect(self.socket, SIGNAL("readyRead()"), self, SLOT("_on_data_received()"))
+
+    def _on_data_received(self):
+        data = self.socket.readAll().data().strip()
+        try:
+            args = data.split(' ')
+            map(lambda x: x.strip(), args)
+            Command.commands[args[0]](self, args)
+        except Exception, e:
+            print(e)
+            self.print_message('>> syntax error')
+            self.print_commands()
+        if self.socket.isOpen():
+            self.socket.write(self.browser.hostname + ' % ')
 
 
 class Browser(QWidget):
@@ -24,153 +158,48 @@ class Browser(QWidget):
         super(Browser, self).__init__()
 
         self.layout = QStackedLayout(self)
-        self.frontView = QWebView(self)
-        self.backView = QWebView(self)
-
-        self.frontView.page().networkAccessManager().sslErrors.connect(self.onSslErrors)
-        self.backView.page().networkAccessManager().sslErrors.connect(self.onSslErrors)
+        self.layout.setStackingMode(QStackedLayout.StackAll)
 
         self.hostname = os.uname()[1]
 
-        self.layout.setStackingMode(QStackedLayout.StackAll)
-        self.layout.addWidget(self.frontView)
-        self.layout.addWidget(self.backView)
-
-        self.commands = {
-            'help': self.cmdHelp,
-            'refresh': self.cmdRefresh,
-            'add': self.cmdAdd,
-            'del': self.cmdDel,
-            'list': self.cmdList,
-            'zoom': self.cmdZoom,
-            'fs': self.cmdFs,
-            'exit': self.cmdExit,
-            'next': self.cmdNext,
-            'restart': self.cmdRestart,
-            'upgrade': self.cmdUpgrade,
-        }
-
         self.timer = QTimer()
         self.timer.setSingleShot(False)
+        self.timer.start(2000)
 
+        self._init_sites()
+
+        self.remote_shell = RemoteShell(self)
+
+        self.connect(self.timer, SIGNAL("timeout()"), self, SLOT("show_next()"))
+        self.show_next()
+
+    def _init_sites(self):
         self.sites = list()
-        self.siteId = -1
+        self.site_id = -1
 
-        self.socket = False
+        url = QUrl("https://www.qt.io/developers/")
+        self.sites.append(Site(self, url, 5, 1))
 
-        url = QUrl("https://google.com")
-        self.sites.append(Site(url, 5, 1))
+        url = QUrl("https://wiki.qt.io/PySide")
+        self.sites.append(Site(self, url, 5, 1))
 
-        self.server = QTcpServer()
-        self.server.listen(QHostAddress.Any, 4242)
+        url = QUrl("https://www.python.org/")
+        self.sites.append(Site(self, url, 5, 1))
 
-        self.server.newConnection.connect(self.onConnection())
-        self.timer.timeout.connect(self.goNext())
+    @property
+    def current_site(self):
+        return self.sites[self.site_id]
 
-        self.connect(self.server, SIGNAL("newConnection()"), self, SLOT("onConnection()"))
-        self.connect(self.timer, SIGNAL("timeout()"), self, SLOT("goNext()"))
-
-        self.goNext()
-        self.goNext()
-
-    def goNext(self):
-        self.cmdNext(list())
-
-    def onConnection(self):
-        self.socket = self.server.nextPendingConnection()
-        self.socket.write(self.hostname + ' % ')
-        self.connect(self.socket, SIGNAL("readyRead()"), self, SLOT("onDataReceived()"))
-
-    def print_(self, text):
-        if self.socket != False:
-            self.socket.write(text + '\n')
-        print(text)
-
-    def onDataReceived(self):
-        data = self.socket.readAll().data().strip()
-        try:
-            args = data.split(' ')
-            map(lambda x: x.strip(), args)
-            self.commands.get(args[0])(args)
-        except Exception:
-            self.print_('>> syntax error')
-            self.printCommandsList()
-        if self.socket.isOpen():
-            self.socket.write(self.hostname + ' % ')
-
-    def printCommandsList(self):
-        self.print_('avaible commands:')
-        for command in self.commands:
-            self.print_('  ' + command)
-
-    def onSslErrors(self, reply, errors):
-        reply.ignoreSslErrors()
-
-    # commands
-    def cmdHelp(self, args):
-        self.print_('>> help')
-        self.printCommandsList()
-
-    def cmdRefresh(self, args):
-        self.print_('>> refresh ' + self.url.toString().encode())
-        self.frontView.reload()
-
-    def cmdAdd(self, args):
-        self.print_('>> add ' + args[1] + ' ' + args[2] + ' ' + args[3])
-        self.sites.append(Site(QUrl(args[1]), int(args[2], int(args[3]))))
-
-    def cmdDel(self, args):
-        self.print_('>> del ' + args[1])
-        self.sites.pop(int(args[1]))
-
-    def cmdList(self, args):
-        self.print_('>> list')
-        self.print_('current list:')
-        sitesCount = len(self.sites)
-        i = 0
-        while i < sitesCount:
-            self.print_('%1c[%1d] %2ds : %3s' % (
-            (i == self.siteId) and '*' or ' ', i, self.sites[i].time, self.sites[i].url.toString().encode()))
-            i += 1
-
-    def cmdZoom(self, args):
-        self.print_('>> zoom ' + args[1])
-        self.frontView.setZoomFactor(float(args[1]))
-
-    def cmdFs(self, args):
-        self.print_('>> fs ' + args[1])
-        if args[1] == '1':
-            self.showFullScreen()
-        else:
-            self.showNormal()
-
-    def cmdExit(self, args):
-        self.print_('>> exit')
-        self.socket.close()
-
-    def cmdNext(self, args):
+    def show_next(self):
         self.timer.stop()
-        self.timer.start(self.sites[self.siteId].time * 1000)
-        self.siteId = (self.siteId + 1) % len(self.sites)
-        print('>> next ' + self.sites[self.siteId].url.toString().encode())
-        self.backView.show()
-        self.frontView, self.backView = self.backView, self.frontView
-        self.backView.load(self.sites[self.siteId].url)
-        self.backView.setZoomFactor(self.sites[self.siteId].zoom)
-        self.backView.hide()
-
-    def cmdRestart(self, args):
-        self.print_('>> restart')
-        self.close()
-
-    def cmdUpgrade(self, args):
-        self.print_('>> upgrade')
-        update = urllib.urlopen('https://raw.github.com/pol51/monitoring_browser/master/webkit.py').read()
-        script = file('webkit.py', 'w')
-        script.write(update)
-        script.close()
-        self.close()
-
+        previous_id = self.site_id
+        self.site_id = (self.site_id + 1) % len(self.sites)
+        current_site = self.current_site
+        self.timer.start(current_site.time * 1000)
+        current_site.show()
+        print('show ' + current_site.url.toString().encode())
+        if previous_id >= 0:
+            self.sites[previous_id].hide()
 
 # main
 browser = Browser()
