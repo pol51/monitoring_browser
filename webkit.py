@@ -4,10 +4,10 @@ import os
 import sys
 import urllib
 
-from PySide.QtCore import QUrl, SIGNAL, SLOT, QTimer
-from PySide.QtGui import QApplication, QWidget, QStackedLayout
-from PySide.QtNetwork import QTcpServer, QHostAddress
-from PySide.QtWebKit import QWebView
+from PyQt5.QtCore import QUrl, pyqtSignal, pyqtSlot, QTimer
+from PyQt5.QtWidgets import QApplication, QWidget, QStackedLayout
+from PyQt5.QtNetwork import QTcpServer, QHostAddress
+from PyQt5.QtWebKitWidgets import QWebView
 
 app = QApplication(sys.argv)
 
@@ -18,7 +18,7 @@ class Site(QWebView):
         parent.layout.addWidget(self)
 
         self.page().networkAccessManager().sslErrors.connect(self.on_ssl_errors)
-
+        
         self.url = url
         self.time = time
         self.zoom = zoom
@@ -31,6 +31,7 @@ class Site(QWebView):
         self.zoom = zoom
         self.setZoomFactor(zoom)
 
+    @pyqtSlot()
     def on_ssl_errors(self, reply, errors):
         reply.ignoreSslErrors()
 
@@ -134,18 +135,20 @@ class RemoteShell(QTcpServer):
         script.close()
         self.close()
 
+    @pyqtSlot()
     def _on_connection(self):
         self.socket = self.nextPendingConnection()
         self.socket.write(self.browser.hostname + ' % ')
-        self.connect(self.socket, SIGNAL("readyRead()"), self, SLOT("_on_data_received()"))
+        self.socket.readyRead.connect(self._on_data_received)
 
+    @pyqtSlot()
     def _on_data_received(self):
         data = self.socket.readAll().data().strip()
         try:
             args = data.split(' ')
             map(lambda x: x.strip(), args)
             Command.commands[args[0]](self, args)
-        except Exception, e:
+        except Exception as e:
             print(e)
             self.print_message('>> syntax error')
             self.print_commands()
@@ -170,7 +173,7 @@ class Browser(QWidget):
 
         self.remote_shell = RemoteShell(self)
 
-        self.connect(self.timer, SIGNAL("timeout()"), self, SLOT("show_next()"))
+        self.timer.timeout.connect(self.show_next)
         self.show_next()
 
     def _init_sites(self):
@@ -180,7 +183,7 @@ class Browser(QWidget):
         url = QUrl("https://www.qt.io/developers/")
         self.sites.append(Site(self, url, 5, 1))
 
-        url = QUrl("https://wiki.qt.io/PySide")
+        url = QUrl("https://www.riverbankcomputing.com/software/pyqt/intro")
         self.sites.append(Site(self, url, 5, 1))
 
         url = QUrl("https://www.python.org/")
@@ -190,6 +193,7 @@ class Browser(QWidget):
     def current_site(self):
         return self.sites[self.site_id]
 
+    @pyqtSlot()
     def show_next(self):
         self.timer.stop()
         previous_id = self.site_id
@@ -197,7 +201,7 @@ class Browser(QWidget):
         current_site = self.current_site
         self.timer.start(current_site.time * 1000)
         current_site.show()
-        print('show ' + current_site.url.toString().encode())
+        print('show ' + current_site.url.toString())
         if previous_id >= 0:
             self.sites[previous_id].hide()
 
